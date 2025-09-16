@@ -6,6 +6,8 @@
     <title>Рулетка</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- Добавляем Tone.js для звуковых эффектов -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
         body {
@@ -41,12 +43,6 @@
             background-color: #1f242b;
             border-radius: 1rem;
             box-shadow: inset 0 0 1rem rgba(0, 0, 0, 0.2);
-        }
-
-        .roulette-controls {
-            display: flex;
-            flex-direction: column;
-            gap: 1rem;
         }
 
         .spin-button {
@@ -231,7 +227,13 @@
                         <span class="text-sm text-gray-400">Ставка:</span>
                         <span id="current-bet-display" class="text-2xl font-bold text-yellow-400">$0</span>
                     </div>
-                    <button id="clear-bets-button" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-lg">Очистить ставки</button>
+                    <div class="flex items-center gap-4">
+                        <button id="clear-bets-button" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-lg">Очистить ставки</button>
+                         <!-- Кнопка отключения звука -->
+                        <button id="mute-button" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-3 rounded-lg text-lg">
+                            <i class="fas fa-volume-up"></i>
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -312,18 +314,17 @@
         </div>
     </div>
     <script type="module">
+        // --- FIREBASE ИНИЦИАЛИЗАЦИЯ ---
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Глобальные переменные, предоставленные средой
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         
-        // Инициализация Firebase
         let app, auth, db, userId;
-        let isAuthReady = false;
+        let isAuthReady = false; 
 
         if (Object.keys(firebaseConfig).length > 0) {
             app = initializeApp(firebaseConfig);
@@ -333,22 +334,17 @@
             onAuthStateChanged(auth, async (user) => {
                 if (user) {
                     userId = user.uid;
-                    console.log("Authenticated with userId:", userId);
                     isAuthReady = true;
-                    // Начать прослушивать изменения состояния игры
                     onSnapshot(doc(db, `artifacts/${appId}/users/${userId}/roulette/gameData`), (docSnap) => {
                         if (docSnap.exists()) {
                             const data = docSnap.data();
-                            console.log("Game data from Firestore:", data);
                             updateGameState(data.balance, data.bets);
                         } else {
-                            // Если данных нет, инициализируем их
                             updateFirestoreData({ balance: 1000, bets: {} });
                             updateGameState(1000, {});
                         }
                     });
                 } else {
-                    console.log("No user signed in. Attempting anonymous sign-in.");
                     try {
                         if (initialAuthToken) {
                             await signInWithCustomToken(auth, initialAuthToken);
@@ -362,13 +358,12 @@
             });
         } else {
             console.error("Firebase config is missing. Game state will not be persisted.");
-            // Запасной вариант для локальной разработки
             userId = crypto.randomUUID();
             isAuthReady = true;
             updateGameState(1000, {});
         }
 
-        // DOM элементы
+        // --- DOM ЭЛЕМЕНТЫ ---
         const canvas = document.getElementById('roulette-wheel');
         const ctx = canvas.getContext('2d');
         const spinButton = document.getElementById('spin-button');
@@ -382,8 +377,9 @@
         const messageText = document.getElementById('message-text');
         const messageOkButton = document.getElementById('message-ok-button');
         const modalOverlay = document.getElementById('modal-overlay');
+        const muteButton = document.getElementById('mute-button');
 
-        // Состояние игры
+        // --- СОСТОЯНИЕ ИГРЫ ---
         let balance = 1000;
         let bets = {};
         let isSpinning = false;
@@ -391,7 +387,54 @@
         let rotation = 0;
         let winningSegmentIndex = -1;
 
-        // Конфигурация колеса рулетки
+        // --- ЗВУКОВЫЕ ЭФФЕКТЫ (Tone.js) ---
+        let soundsReady = false;
+        // Создаем синтезаторы для разных звуков
+        const sounds = {
+            placeBet: new Tone.Synth({ oscillator: { type: 'sine' }, envelope: { attack: 0.005, decay: 0.1, sustain: 0.05, release: 0.1 } }).toDestination(),
+            win: new Tone.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.05, decay: 0.2, sustain: 0.2, release: 0.5 } }).toDestination(),
+            lose: new Tone.Synth({ oscillator: { type: 'square' }, envelope: { attack: 0.01, decay: 0.5, sustain: 0, release: 0.2 } }).toDestination(),
+            clear: new Tone.Synth({ oscillator: { type: 'sawtooth' }, envelope: { attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.2 } }).toDestination(),
+            tick: new Tone.MembraneSynth({ pitchDecay: 0.008, octaves: 2, envelope: { attack: 0.0006, decay: 0.25, sustain: 0 } }).toDestination()
+        };
+        sounds.tick.volume.value = -12;
+        sounds.lose.volume.value = -6;
+
+        /**
+         * Проигрывает определенный звук.
+         * @param {string} soundName - Название звука ('placeBet', 'win', 'lose', 'clear', 'tick').
+         */
+        function playSound(soundName) {
+            if (!soundsReady || Tone.Destination.mute) return;
+            
+            try {
+                switch(soundName) {
+                    case 'placeBet':
+                        sounds.placeBet.triggerAttackRelease('C5', '8n', Tone.now());
+                        break;
+                    case 'win':
+                        const now = Tone.now();
+                        sounds.win.triggerAttackRelease('C5', '8n', now);
+                        sounds.win.triggerAttackRelease('E5', '8n', now + 0.2);
+                        sounds.win.triggerAttackRelease('G5', '8n', now + 0.4);
+                        break;
+                    case 'lose':
+                        sounds.lose.triggerAttackRelease('A3', '4n', Tone.now());
+                        break;
+                    case 'clear':
+                        sounds.clear.triggerAttackRelease('G4', '8n', Tone.now());
+                        break;
+                    case 'tick':
+                        sounds.tick.triggerAttackRelease("C2", "8n", Tone.now());
+                        break;
+                }
+            } catch (error) {
+                console.error(`Error playing sound ${soundName}:`, error);
+            }
+        }
+
+
+        // --- КОНФИГУРАЦИЯ КОЛЕСА РУЛЕТКИ ---
         const wheelNumbers = [0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10, 5, 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26];
         const numberColors = {
             0: 'green', 1: 'red', 2: 'black', 3: 'red', 4: 'black', 5: 'red', 6: 'black', 7: 'red', 8: 'black', 9: 'red', 10: 'black', 11: 'black', 12: 'red', 13: 'black', 14: 'red', 15: 'black', 16: 'red', 17: 'black', 18: 'red', 19: 'red', 20: 'black', 21: 'red', 22: 'black', 23: 'red', 24: 'black', 25: 'red', 26: 'black', 27: 'red', 28: 'black', 29: 'black', 30: 'red', 31: 'black', 32: 'red', 33: 'black', 34: 'red', 35: 'black', 36: 'red'
@@ -399,14 +442,14 @@
         const totalSegments = wheelNumbers.length;
         const segmentAngle = (2 * Math.PI) / totalSegments;
 
-        // Функция для отображения пользовательского сообщения
+        // --- ФУНКЦИИ УПРАВЛЕНИЯ ИГРОЙ ---
+
         function showMessage(text) {
             messageText.textContent = text;
             messageBox.style.display = 'flex';
             modalOverlay.style.display = 'block';
         }
 
-        // Функция для обновления данных в Firestore
         async function updateFirestoreData(data) {
             if (isAuthReady && db && userId) {
                 try {
@@ -415,31 +458,25 @@
                 } catch (e) {
                     console.error("Error writing document: ", e);
                 }
-            } else {
-                console.warn("Firestore not ready. Not saving data.");
             }
         }
 
-        // Функция для обновления состояния игры и интерфейса
         function updateGameState(newBalance, newBets) {
             balance = newBalance;
-            bets = newBets;
+            bets = newBets || {};
             balanceDisplay.textContent = `$${balance}`;
             updateCurrentBetDisplay();
             updateBettingTableUI();
         }
 
-        // Функция для обновления отображения общей суммы ставки
         function updateCurrentBetDisplay() {
             const totalBet = Object.values(bets).reduce((sum, bet) => sum + bet, 0);
             currentBetDisplay.textContent = `$${totalBet}`;
         }
 
-        // Функция для обновления визуального состояния ячеек стола ставок
         function updateBettingTableUI() {
             document.querySelectorAll('.bet-cell').forEach(cell => {
-                cell.classList.remove('selected');
-                cell.classList.remove('winning-cell-pulse'); // Убираем пульсацию
+                cell.classList.remove('selected', 'winning-cell-pulse');
                 const chipDisplay = cell.querySelector('.chip-display');
                 if (chipDisplay) chipDisplay.remove();
             });
@@ -447,21 +484,9 @@
             for (const key in bets) {
                 if (bets[key] > 0) {
                     const [type, value] = key.split(':');
-                    let cell = null;
-
-                    if (type === 'number') {
-                        cell = document.querySelector(`.bet-cell[data-number="${value}"]`);
-                    } else if (type === 'dozen') {
-                        cell = document.querySelector(`.bet-cell[data-type="dozen"][data-value="${value}"]`);
-                    } else if (type === 'column') {
-                        cell = document.querySelector(`.bet-cell[data-type="column"][data-value="${value}"]`);
-                    } else if (type === 'half') {
-                        cell = document.querySelector(`.bet-cell[data-type="half"][data-value="${value}"]`);
-                    } else if (type === 'evenodd') {
-                        cell = document.querySelector(`.bet-cell[data-type="evenodd"][data-value="${value}"]`);
-                    } else if (type === 'color') {
-                        cell = document.querySelector(`.bet-cell[data-type="color"][data-value="${value}"]`);
-                    }
+                    let cell = (type === 'number')
+                        ? document.querySelector(`.bet-cell[data-number="${value}"]`)
+                        : document.querySelector(`.bet-cell[data-type="${type}"][data-value="${value}"]`);
 
                     if (cell) {
                         cell.classList.add('selected');
@@ -473,66 +498,46 @@
                 }
             }
         }
-
-        // Функция для отрисовки колеса рулетки
+        
         function drawWheel() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
             const centerX = canvas.width / 2;
             const centerY = canvas.height / 2;
             const radius = Math.min(centerX, centerY) * 0.9;
-            const innerRadius = radius * 0.1;
 
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.save();
             ctx.translate(centerX, centerY);
             ctx.rotate(rotation);
 
             for (let i = 0; i < totalSegments; i++) {
                 const startAngle = i * segmentAngle;
-                const endAngle = (i + 1) * segmentAngle;
                 const number = wheelNumbers[i];
                 const color = numberColors[number];
 
-                // Отрисовка сектора с градиентом
                 ctx.beginPath();
                 ctx.moveTo(0, 0);
-                ctx.arc(0, 0, radius, startAngle, endAngle);
+                ctx.arc(0, 0, radius, startAngle, startAngle + segmentAngle);
                 ctx.closePath();
                 
-                const gradient = ctx.createRadialGradient(0, 0, innerRadius, 0, 0, radius);
-                
-                if (color === 'red') {
-                    gradient.addColorStop(0, '#d93a3a');
-                    gradient.addColorStop(1, '#b91c1c');
-                } else if (color === 'black') {
-                    gradient.addColorStop(0, '#2d2d2d');
-                    gradient.addColorStop(1, '#171717');
-                } else {
-                    gradient.addColorStop(0, '#28a745');
-                    gradient.addColorStop(1, '#166534');
-                }
+                const gradient = ctx.createRadialGradient(0, 0, radius * 0.1, 0, 0, radius);
+                if (color === 'red') { gradient.addColorStop(0, '#d93a3a'); gradient.addColorStop(1, '#b91c1c'); } 
+                else if (color === 'black') { gradient.addColorStop(0, '#2d2d2d'); gradient.addColorStop(1, '#171717'); } 
+                else { gradient.addColorStop(0, '#28a745'); gradient.addColorStop(1, '#166534'); }
                 ctx.fillStyle = gradient;
                 ctx.fill();
 
-                // Отрисовка номера
                 ctx.save();
                 ctx.rotate(startAngle + segmentAngle / 2);
-                // Выравнивание по центру относительно своей ячейки
                 ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
                 ctx.fillStyle = '#e6edf3';
                 ctx.font = 'bold 20px Inter, sans-serif';
                 ctx.fillText(number.toString(), radius * 0.85, 0); 
                 ctx.restore();
             }
-
-            // Отрисовка внутреннего круга
-            ctx.beginPath();
-            ctx.arc(0, 0, innerRadius, 0, 2 * Math.PI);
-            ctx.fillStyle = '#1f242b';
-            ctx.fill();
-
+            
             ctx.restore();
 
-            // Отрисовка указателя справа
             ctx.beginPath();
             ctx.moveTo(centerX + radius, centerY);
             ctx.lineTo(centerX + radius + 20, centerY - 10);
@@ -542,19 +547,11 @@
             ctx.fill();
         }
 
-        // Проверка выигрыша
         function checkWin(winningNumber) {
             let winnings = 0;
             const number = parseInt(winningNumber);
             const color = numberColors[number];
-            const isEven = number % 2 === 0 && number !== 0;
-            const isOdd = number % 2 !== 0 && number !== 0;
-            const isHalf1 = number >= 1 && number <= 18;
-            const isHalf2 = number >= 19 && number <= 36;
-            const isDozen1 = number >= 1 && number <= 12;
-            const isDozen2 = number >= 13 && number <= 24;
-            const isDozen3 = number >= 25 && number <= 36;
-            
+
             for (const key in bets) {
                 const [type, value] = key.split(':');
                 const betAmount = bets[key];
@@ -562,55 +559,12 @@
                 let payout = 0;
 
                 switch (type) {
-                    case 'number':
-                        if (parseInt(value) === number) {
-                            win = true;
-                            payout = 35;
-                        }
-                        break;
-                    case 'color':
-                        if (value === color) {
-                            win = true;
-                            payout = 1;
-                        }
-                        break;
-                    case 'evenodd':
-                        if (value === 'even' && isEven) {
-                            win = true;
-                            payout = 1;
-                        } else if (value === 'odd' && isOdd) {
-                            win = true;
-                            payout = 1;
-                        }
-                        break;
-                    case 'half':
-                        if (value === '1st' && isHalf1) {
-                            win = true;
-                            payout = 1;
-                        } else if (value === '2nd' && isHalf2) {
-                            win = true;
-                            payout = 1;
-                        }
-                        break;
-                    case 'dozen':
-                        if (value === '1st' && isDozen1) {
-                            win = true;
-                            payout = 2;
-                        } else if (value === '2nd' && isDozen2) {
-                            win = true;
-                            payout = 2;
-                        } else if (value === '3rd' && isDozen3) {
-                            win = true;
-                            payout = 2;
-                        }
-                        break;
-                    case 'column':
-                        const betColumn = parseInt(value);
-                        if (number !== 0 && ((number - 1) % 3 === (betColumn - 1))) {
-                             win = true;
-                             payout = 2;
-                        }
-                        break;
+                    case 'number': if (parseInt(value) === number) { win = true; payout = 35; } break;
+                    case 'color': if (value === color && number !== 0) { win = true; payout = 1; } break;
+                    case 'evenodd': if ((value === 'even' && number % 2 === 0 && number !== 0) || (value === 'odd' && number % 2 !== 0)) { win = true; payout = 1; } break;
+                    case 'half': if ((value === '1st' && number >= 1 && number <= 18) || (value === '2nd' && number >= 19 && number <= 36)) { win = true; payout = 1; } break;
+                    case 'dozen': if ((value === '1st' && number >= 1 && number <= 12) || (value === '2nd' && number >= 13 && number <= 24) || (value === '3rd' && number >= 25 && number <= 36)) { win = true; payout = 2; } break;
+                    case 'column': if (number !== 0 && (number % 3 === parseInt(value) % 3)) { win = true; payout = 2; } break;
                 }
 
                 if (win) {
@@ -620,7 +574,7 @@
             return winnings;
         }
 
-        // Цикл анимации вращения
+        let tickLoop;
         function spinWheel() {
             if (isSpinning) return;
             const totalBet = Object.values(bets).reduce((sum, bet) => sum + bet, 0);
@@ -628,46 +582,53 @@
                 showMessage('Пожалуйста, сделайте ставку перед вращением.');
                 return;
             }
-            if (balance < totalBet) {
-                showMessage('Недостаточно средств. Пожалуйста, пополните баланс или уменьшите ставку.');
-                return;
-            }
 
             isSpinning = true;
             spinButton.disabled = true;
             bettingTable.style.pointerEvents = 'none';
 
-            // Вычитаем ставку из баланса
             const newBalanceAfterBet = balance - totalBet;
             updateFirestoreData({ balance: newBalanceAfterBet });
 
-            // Выбираем выигрышное число
             winningSegmentIndex = Math.floor(Math.random() * totalSegments);
             const winningNumberValue = wheelNumbers[winningSegmentIndex];
             
-            // Вычисляем финальный угол поворота, чтобы указатель остановился по центру выигрышного номера
-            // Количество оборотов от 15 до 75
-            const extraRotations = Math.floor(Math.random() * (75 - 15 + 1)) + 15;
+            const extraRotations = Math.floor(Math.random() * 10) + 5;
             const finalRotation = (2 * Math.PI * extraRotations) - (winningSegmentIndex * segmentAngle + segmentAngle / 2);
 
             let startTime = null;
-            const duration = 8000; // Увеличено для более азартного вращения
+            const duration = 8000;
             const startRotation = rotation;
+
+            // Запускаем звук тиканья колеса
+            if (soundsReady) {
+                tickLoop = new Tone.Loop(time => playSound('tick'), "8n").start(0);
+                Tone.Transport.start();
+            }
 
             function animate(timestamp) {
                 if (!startTime) startTime = timestamp;
                 const elapsedTime = timestamp - startTime;
                 const progress = Math.min(elapsedTime / duration, 1);
-                // Функция замедления для реалистичного вращения
                 const easedProgress = 1 - Math.pow(1 - progress, 3);
 
                 rotation = startRotation + (finalRotation - startRotation) * easedProgress;
                 drawWheel();
+                
+                // Обновляем скорость тиканья
+                if (soundsReady && tickLoop) {
+                    const currentSpeed = 1 - easedProgress;
+                    const interval = 0.5 - (0.5 - 0.05) * currentSpeed;
+                    tickLoop.interval = interval;
+                }
 
                 if (progress < 1) {
                     requestAnimationFrame(animate);
                 } else {
-                    // Вращение завершено
+                    if (soundsReady) {
+                        Tone.Transport.stop();
+                        tickLoop.dispose();
+                    }
                     isSpinning = false;
                     spinButton.disabled = false;
                     bettingTable.style.pointerEvents = 'auto';
@@ -678,42 +639,50 @@
                     updateFirestoreData({ balance: finalBalance, bets: {} });
 
                     if (winnings > 0) {
-                        resultDisplay.textContent = `Победа! Выпало число ${winningNumberValue}. Вы выиграли $${winnings - totalBet}.`;
-                        resultDisplay.classList.remove('text-red-400');
+                        playSound('win');
+                        const netWin = winnings - totalBet;
+                        resultDisplay.textContent = `Выпало ${winningNumberValue}. Вы выиграли $${netWin}!`;
                         resultDisplay.classList.add('text-green-400');
+                        resultDisplay.classList.remove('text-red-400');
                     } else {
-                        resultDisplay.textContent = `Проигрыш. Выпало число ${winningNumberValue}.`;
-                        resultDisplay.classList.remove('text-green-400');
+                        playSound('lose');
+                        resultDisplay.textContent = `Выпало ${winningNumberValue}. Ставка проиграла.`;
                         resultDisplay.classList.add('text-red-400');
+                        resultDisplay.classList.remove('text-green-400');
                     }
 
-                    // Находим выигрышную ячейку и добавляем эффект пульсации
-                    let winningCell;
-                    if (winningNumberValue === 0) {
-                        winningCell = document.querySelector(`.bet-cell[data-number="0"]`);
-                    } else {
-                        winningCell = document.querySelector(`.bet-cell[data-number="${winningNumberValue}"]`);
-                    }
+                    const winningCell = document.querySelector(`.bet-cell[data-number="${winningNumberValue}"]`);
                     if (winningCell) {
                         winningCell.classList.add('winning-cell-pulse');
-                        setTimeout(() => {
-                           winningCell.classList.remove('winning-cell-pulse');
-                        }, 4000);
+                        setTimeout(() => winningCell.classList.remove('winning-cell-pulse'), 4000);
                     }
                 }
             }
             requestAnimationFrame(animate);
         }
 
-        // Начальная отрисовка и привязка обработчиков событий при загрузке страницы
+        // --- ИНИЦИАЛИЗАЦИЯ ПРИ ЗАГРУЗКЕ СТРАНИЦЫ ---
         window.onload = () => {
             drawWheel();
 
-            // Обработчики событий
+            // Инициализация звука по первому взаимодействию с пользователем
+            document.body.addEventListener('click', async () => {
+                if (!soundsReady && typeof Tone !== 'undefined') {
+                    await Tone.start();
+                    soundsReady = true;
+                    console.log("Audio context started.");
+                }
+            }, { once: true });
+            
             spinButton.addEventListener('click', spinWheel);
+            
             clearBetsButton.addEventListener('click', () => {
-                updateFirestoreData({ bets: {} });
+                if (!isSpinning) {
+                    playSound('clear');
+                    updateFirestoreData({ bets: {} });
+                }
             });
+
             betAmountInput.addEventListener('change', (e) => {
                 betAmount = parseInt(e.target.value);
                 if (isNaN(betAmount) || betAmount <= 0) {
@@ -726,21 +695,19 @@
                 if (isSpinning) return;
                 const cell = e.target.closest('.bet-cell');
                 if (cell) {
+                    playSound('placeBet');
                     const dataType = cell.dataset.type || 'number';
                     const dataValue = cell.dataset.number || cell.dataset.value;
                     const betKey = `${dataType}:${dataValue}`;
 
-                    if (balance < betAmount) {
+                    const totalBet = Object.values(bets).reduce((sum, bet) => sum + bet, 0);
+                    if (balance < totalBet + betAmount) {
                         showMessage('Недостаточно средств для этой ставки.');
                         return;
                     }
 
                     const newBets = { ...bets };
-                    if (newBets[betKey]) {
-                        newBets[betKey] += betAmount;
-                    } else {
-                        newBets[betKey] = betAmount;
-                    }
+                    newBets[betKey] = (newBets[betKey] || 0) + betAmount;
                     updateFirestoreData({ bets: newBets });
                 }
             });
@@ -749,8 +716,19 @@
                 messageBox.style.display = 'none';
                 modalOverlay.style.display = 'none';
             });
+            
+            muteButton.addEventListener('click', () => {
+                if (!soundsReady) return;
+                const icon = muteButton.querySelector('i');
+                Tone.Destination.mute = !Tone.Destination.mute;
+                if (Tone.Destination.mute) {
+                    icon.classList.replace('fa-volume-up', 'fa-volume-mute');
+                } else {
+                    icon.classList.replace('fa-volume-mute', 'fa-volume-up');
+                }
+            });
         };
-
     </script>
 </body>
 </html>
+
